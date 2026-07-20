@@ -61,9 +61,13 @@ KEY_ROWS = [
     row("shadow_demote_num", nomad_col="shadow_demote_num"),
     row("pgdemote_anon", nomad_col="pgdemote_anon"),
     ratio("shadow_demote_num / pgdemote_anon", nomad_cols=("shadow_demote_num", "pgdemote_anon")),
-    row("pgpromote_tried", tpp_col="pgpromote_tried"),
-    row("pgpromote_anon", tpp_col="pgpromote_anon"),
-    ratio("pgpromote_tried / pgpromote_anon", tpp_cols=("pgpromote_tried", "pgpromote_anon")),
+    row("NUMA_HINT_FAULTS 또는 pgpromote_candidate_nomad",
+        tpp_col=("numa_hint_faults", "numa_hint_faults_local"),
+        nomad_col=("pgpromote_candidate_nomad", "numa_hint_faults_local")),
+    row("pgpromote_anon 또는 success_nr", tpp_col="pgpromote_anon", nomad_col="success_nr"),
+    ratio("NUMA_HINT_FAULTS / pgpromote_anon 또는 pgpromote_candidate_nomad / success_nr",
+          tpp_cols=(("numa_hint_faults", "numa_hint_faults_local"), "pgpromote_anon"),
+          nomad_cols=(("pgpromote_candidate_nomad", "numa_hint_faults_local"), "success_nr")),
 
     sep("write 워크로드에서"),
     row("write_protect_break_num", nomad_col="write_protect_break_num"),
@@ -98,6 +102,8 @@ ALL_ROWS = [
     both("pgpromote_candidate_demoted_nomad", "pgpromote_candidate_demoted_nomad"),
     both("pgpromote_candidate_anon_nomad", "pgpromote_candidate_anon_nomad"),
     both("pgpromote_candidate_file_nomad", "pgpromote_candidate_file_nomad"),
+    both("numa_hint_faults", "numa_hint_faults"),
+    both("numa_hint_faults_local", "numa_hint_faults_local"),
 
     sep("실패 사유"),
     both("pgmigrate_dst_node_full_fail", "pgmigrate_dst_node_full_fail"),
@@ -148,15 +154,27 @@ def compute_values(df):
     return values
 
 
+def lookup_row_value(values, col, n):
+    """col is either a counter name, or (a, b) meaning "a - b"."""
+    if col is None:
+        return [None] * n
+    if isinstance(col, tuple):
+        a_name, b_name = col
+        a_vals = values.get(a_name)
+        b_vals = values.get(b_name)
+        if a_vals is None or b_vals is None:
+            return [None] * n
+        return [a - b for a, b in zip(a_vals, b_vals)]
+    return values.get(col, [None] * n)
+
+
 def compute_ratio(values, cols, n):
     if cols is None:
         return [None] * n
-    num_name, den_name = cols
-    nums = values.get(num_name)
-    dens = values.get(den_name)
-    if nums is None or dens is None:
-        return [None] * n
-    return [a / b if b not in (0, None) else None for a, b in zip(nums, dens)]
+    num_col, den_col = cols
+    nums = lookup_row_value(values, num_col, n)
+    dens = lookup_row_value(values, den_col, n)
+    return [a / b if (a is not None and b not in (0, None)) else None for a, b in zip(nums, dens)]
 
 
 def compute_sum(computed, labels, n):
@@ -184,7 +202,7 @@ def build_sheet(df, system, row_defs):
         else:
             if kind == "row":
                 col = row_def["nomad_col"] if system == "microbench_nomad" else row_def["tpp_col"]
-                vals = values.get(col, [None] * n) if col else [None] * n
+                vals = lookup_row_value(values, col, n)
             elif kind == "ratio":
                 cols = row_def["nomad_cols"] if system == "microbench_nomad" else row_def["tpp_cols"]
                 vals = compute_ratio(values, cols, n)

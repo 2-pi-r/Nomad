@@ -345,13 +345,14 @@ absl::Status MemAccess::GetTppCounter(std::string &out,
     return absl::UnavailableError("open tpp counter file");
 
   constexpr absl::string_view kPrefix0("pgmigrate"), kPrefix1("pgpromote"),
-      kPrefix2("pgdemote");
+      kPrefix2("pgdemote"), kPrefix3("numa_hint_faults");
 
   std::string type, num;
   while (counter_file >> type && counter_file >> num) {
     if (type.compare(0, kPrefix0.size(), std::string(kPrefix0)) == 0 ||
         type.compare(0, kPrefix1.size(), std::string(kPrefix1)) == 0 ||
-        type.compare(0, kPrefix2.size(), std::string(kPrefix2)) == 0) {
+        type.compare(0, kPrefix2.size(), std::string(kPrefix2)) == 0 ||
+        type.compare(0, kPrefix3.size(), std::string(kPrefix3)) == 0) {
       out.append(
           absl::StrFormat(kLogFormatStr, std::string(prefix) + type, num));
     }
