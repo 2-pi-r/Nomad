@@ -1,0 +1,113 @@
+diff -urN a/Makefile b/Makefile
+--- a/Makefile	2026-09-11 19:20:26.117689017 +0900
++++ b/Makefile	2026-09-11 19:20:26.120093723 +0900
+@@ -261,7 +261,11 @@
+ endif
+ 
+ ifeq ($(MASSTREE_S),1)
+-UPDATE_MASSTREE := $(shell cd ./`git rev-parse --show-cdup` && cur=`git submodule status --cached masstree | head -c 41 | tail -c +2` && if test -z `cd masstree; git rev-list -n1 $$cur^..HEAD 2>/dev/null`; then (echo Updating masstree... 1>&2; cd masstree; git checkout -f master >/dev/null; git pull; cd ..; git submodule update masstree); fi)
++# SSP: disabled. masstree is vendored in this tree and never needs updating.
++# The original recipe cd's to the ENCLOSING git repository's root and runs
++# "git checkout -f master; git pull" there. Since this tree lives inside the
++# Nomad repository, building would hijack whatever branch is checked out.
++#UPDATE_MASSTREE := $(shell cd ./`git rev-parse --show-cdup` && cur=`git submodule status --cached masstree | head -c 41 | tail -c +2` && if test -z `cd masstree; git rev-list -n1 $$cur^..HEAD 2>/dev/null`; then (echo Updating masstree... 1>&2; cd masstree; git checkout -f master >/dev/null; git pull; cd ..; git submodule update masstree); fi)
+ endif
+ 
+ ifneq ($(strip $(DEBUG_S).$(CHECK_INVARIANTS_S).$(EVENT_COUNTERS_S)),$(strip $(DEP_MAIN_CONFIG)))
+diff -urN a/allocator.cc b/allocator.cc
+--- a/allocator.cc	2026-09-11 19:20:26.129699831 +0900
++++ b/allocator.cc	2026-09-11 19:20:26.132445305 +0900
+@@ -334,8 +334,10 @@
+   const size_t sz =
+     reinterpret_cast<uintptr_t>(pc.region_end) -
+     reinterpret_cast<uintptr_t>(pc.region_begin);
++  // SSP: dropped Memtis' MAP_HUGETLB. hugetlb pages cannot be migrated, so
++  // enabling this path (--numa-memory) would silently disable tiering.
+   void * const x = mmap(pc.region_begin, sz, PROT_READ | PROT_WRITE,
+-      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_HUGETLB, -1, 0);
++      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+   if (unlikely(x == MAP_FAILED)) {
+     perror("mmap");
+     std::cerr << "  cpu" << cpu
+diff -urN a/benchmarks/bench.cc b/benchmarks/bench.cc
+--- a/benchmarks/bench.cc	2026-09-11 19:20:26.140052200 +0900
++++ b/benchmarks/bench.cc	2026-09-11 19:20:26.141620333 +0900
+@@ -8,6 +8,8 @@
+ #include <stdlib.h>
+ #include <sched.h>
+ #include <unistd.h>
++#include <spawn.h>
++#include <sys/wait.h>
+ #include <sys/sysinfo.h>
+ 
+ #include "bench.h"
+@@ -29,6 +31,28 @@
+ using namespace std;
+ using namespace util;
+ 
++extern char **environ;
++
++// SSP: run the measurement script named by $envname, if that variable is set.
++// Uses posix_spawn, not system()/fork(): glibc implements it with
++// clone(CLONE_VM|CLONE_VFORK), so the loaded DB's page tables are not copied.
++// A real fork() would write-protect tens of GB of PTEs, causing a storm of COW
++// faults and interfering with Nomad's shadow page faults.
++static void
++ssp_hook(const char *envname)
++{
++  const char *cmd = getenv(envname);
++  if (!cmd)
++    return; // unset (e.g. host-side calibration): do nothing
++  char * const argv[] = { (char *) "/bin/sh", (char *) "-c",
++                          (char *) cmd, nullptr };
++  pid_t pid;
++  if (posix_spawn(&pid, "/bin/sh", nullptr, nullptr, argv, environ) == 0)
++    waitpid(pid, nullptr, 0);
++  else
++    perror("posix_spawn");
++}
++
+ size_t nthreads = 1;
+ volatile bool running = true;
+ int verbose = 0;
+@@ -253,10 +277,13 @@
+     (*it)->start();
+ 
+   barrier_a.wait_for(); // wait for all threads to start up
++  // SSP: loading is done and the workers are parked on barrier_b, so no
++  // transaction has run yet. This is where the measurement window opens.
++  ssp_hook("SSP_PRE_HOOK");
+   timer t, t_nosync;
+   barrier_b.count_down(); // bombs away!
+   unsigned long elapsed_time = 0;
+-  if (1) {//run_mode == RUNMODE_TIME) {
++  if (run_mode == RUNMODE_TIME) {
+     size_t commits = 0;
+     size_t end = 0;
+     do {
+@@ -275,9 +302,11 @@
+ 	    if (workers[i]->check_bench_end())
+ 		end = 1;
+ 	}
+-    } while (!end);
+-    //while (elapsed_time < runtime && !end);
+-    //sleep(runtime);
++    // SSP: Memtis polled until check_bench_end() and ignored --runtime.
++    // Restore --runtime as the termination condition but keep the periodic
++    // throughput print above, which gives the time series we want.
++    // Granularity is the 5 s poll interval, so runtime rounds up to it.
++    } while (elapsed_time < runtime && !end);
+     running = false;
+   }
+   __sync_synchronize();
+@@ -299,6 +328,10 @@
+                                          // because do_txn_finish() potentially
+                                          // waits a bit
+ 
++  // SSP: workers have joined, so the measurement window closes here. Everything
++  // after this point is teardown and must stay out of the counters.
++  ssp_hook("SSP_POST_HOOK");
++
+   // various sanity checks
+   ALWAYS_ASSERT(get<0>(persisted_info) == get<1>(persisted_info));
+   // not == b/c persisted_info does not count read-only txns

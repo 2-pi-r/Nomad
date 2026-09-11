@@ -33,3 +33,5 @@ cd third_party/tmp/YCSB
 patch -p1 < ../../ycsb.diff
 mvn -pl site.ycsb:redis-binding -am clean package
 cd ${curr_dir}
+
+bash third_party/prepare_silo.sh
