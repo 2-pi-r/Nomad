@@ -14,10 +14,14 @@ rm -rf third_party/tmp/memtis ${silo_dir}
 # Memtis(SOSP'23)의 Silo 트리만 sparse checkout.
 # upstream stephentu/silo와 tpcc.cc / dbtest.cc는 바이트 단위로 동일하고,
 # masstree와 lz4가 트리에 포함되어 있어 빌드 중 네트워크가 필요 없다.
-git clone --depth 1 --filter=blob:none --sparse \
+# clone의 --sparse 플래그는 git 2.25대에서 URL을 경로로 오인하는 버그가 있다.
+# --no-checkout으로 받고 sparse-checkout을 따로 거는, 그보다 오래된 방식을 쓴다.
+git clone --depth 1 --filter=blob:none --no-checkout \
     https://github.com/cosmoss-jigu/memtis.git third_party/tmp/memtis
 cd third_party/tmp/memtis
+git sparse-checkout init --cone
 git sparse-checkout set memtis-userspace/bench_dir/silo
+git checkout
 cd ${curr_dir}
 
 cp -a third_party/tmp/memtis/memtis-userspace/bench_dir/silo ${silo_dir}
