@@ -1,6 +1,6 @@
 diff -urN a/Makefile b/Makefile
---- a/Makefile	2026-09-11 19:20:26.117689017 +0900
-+++ b/Makefile	2026-09-11 19:20:26.120093723 +0900
+--- a/Makefile	2026-09-11 21:16:56.911334023 +0900
++++ b/Makefile	2026-09-11 21:16:56.913572238 +0900
 @@ -261,7 +261,11 @@
  endif
  
@@ -15,8 +15,8 @@ diff -urN a/Makefile b/Makefile
  
  ifneq ($(strip $(DEBUG_S).$(CHECK_INVARIANTS_S).$(EVENT_COUNTERS_S)),$(strip $(DEP_MAIN_CONFIG)))
 diff -urN a/allocator.cc b/allocator.cc
---- a/allocator.cc	2026-09-11 19:20:26.129699831 +0900
-+++ b/allocator.cc	2026-09-11 19:20:26.132445305 +0900
+--- a/allocator.cc	2026-09-11 21:16:56.919335916 +0900
++++ b/allocator.cc	2026-09-11 21:16:56.921237517 +0900
 @@ -334,8 +334,10 @@
    const size_t sz =
      reinterpret_cast<uintptr_t>(pc.region_end) -
@@ -30,8 +30,8 @@ diff -urN a/allocator.cc b/allocator.cc
      perror("mmap");
      std::cerr << "  cpu" << cpu
 diff -urN a/benchmarks/bench.cc b/benchmarks/bench.cc
---- a/benchmarks/bench.cc	2026-09-11 19:20:26.140052200 +0900
-+++ b/benchmarks/bench.cc	2026-09-11 19:20:26.141620333 +0900
+--- a/benchmarks/bench.cc	2026-09-11 21:16:56.928739226 +0900
++++ b/benchmarks/bench.cc	2026-09-11 21:16:56.929871385 +0900
 @@ -8,6 +8,8 @@
  #include <stdlib.h>
  #include <sched.h>
@@ -81,26 +81,35 @@ diff -urN a/benchmarks/bench.cc b/benchmarks/bench.cc
    barrier_b.count_down(); // bombs away!
    unsigned long elapsed_time = 0;
 -  if (1) {//run_mode == RUNMODE_TIME) {
-+  if (run_mode == RUNMODE_TIME) {
++  { // SSP: poll in both run modes so the throughput time series is always printed
      size_t commits = 0;
      size_t end = 0;
      do {
-@@ -275,9 +302,11 @@
- 	    if (workers[i]->check_bench_end())
- 		end = 1;
+@@ -271,13 +298,18 @@
+ 	cerr << "time: " << elapsed_time << " throughput: " << tmp_thput << " ops/sec" << endl;
+ 	commits = current_commits;
+ 
++	// SSP: "every worker is done", not "any". Memtis stopped at the first
++	// one, which under --ops-per-worker cuts the others short so each run
++	// commits a different number of transactions.
++	end = 1;
+ 	for (size_t i = 0; i < nthreads; i++) {
+-	    if (workers[i]->check_bench_end())
+-		end = 1;
++	    if (!workers[i]->check_bench_end())
++		end = 0;
  	}
 -    } while (!end);
 -    //while (elapsed_time < runtime && !end);
 -    //sleep(runtime);
-+    // SSP: Memtis polled until check_bench_end() and ignored --runtime.
-+    // Restore --runtime as the termination condition but keep the periodic
-+    // throughput print above, which gives the time series we want.
-+    // Granularity is the 5 s poll interval, so runtime rounds up to it.
-+    } while (elapsed_time < runtime && !end);
++    // SSP: Memtis ignored --runtime and polled until a worker ended. Stop on
++    // --runtime in RUNMODE_TIME and on every worker finishing its ops in
++    // RUNMODE_OPS. Granularity is the 5 s poll interval, so runtime rounds up.
++    } while (!end && (run_mode != RUNMODE_TIME || elapsed_time < runtime));
      running = false;
    }
    __sync_synchronize();
-@@ -299,6 +328,10 @@
+@@ -299,6 +331,10 @@
                                           // because do_txn_finish() potentially
                                           // waits a bit
  
@@ -111,3 +120,14 @@ diff -urN a/benchmarks/bench.cc b/benchmarks/bench.cc
    // various sanity checks
    ALWAYS_ASSERT(get<0>(persisted_info) == get<1>(persisted_info));
    // not == b/c persisted_info does not count read-only txns
+diff -urN a/benchmarks/dbtest.cc b/benchmarks/dbtest.cc
+--- a/benchmarks/dbtest.cc	2026-09-11 21:16:56.936426832 +0900
++++ b/benchmarks/dbtest.cc	2026-09-11 21:16:56.938745910 +0900
+@@ -158,6 +158,7 @@
+       ops_per_worker = strtoul(optarg, NULL, 10);
+       ALWAYS_ASSERT(ops_per_worker > 0);
+       run_mode = RUNMODE_OPS;
++      break; // SSP: upstream falls through into 'o' and clobbers --bench-opts
+ 
+     case 'o':
+       bench_opts = optarg;
