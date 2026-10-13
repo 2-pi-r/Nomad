@@ -1,5 +1,5 @@
 diff --git a/core/src/main/java/site/ycsb/workloads/CoreWorkload.java b/core/src/main/java/site/ycsb/workloads/CoreWorkload.java
-index 68f377c1..d4a21273 100644
+index 68f377c1..18d6448f 100644
 --- a/core/src/main/java/site/ycsb/workloads/CoreWorkload.java
 +++ b/core/src/main/java/site/ycsb/workloads/CoreWorkload.java
 @@ -24,6 +24,7 @@ import site.ycsb.measurements.Measurements;
@@ -45,11 +45,15 @@ index 68f377c1..d4a21273 100644
  
    private Measurements measurements = Measurements.getMeasurements();
  
-@@ -545,6 +567,41 @@ public class CoreWorkload extends Workload {
+@@ -545,6 +567,45 @@ public class CoreWorkload extends Workload {
          INSERTION_RETRY_LIMIT, INSERTION_RETRY_LIMIT_DEFAULT));
      insertionRetryInterval = Integer.parseInt(p.getProperty(
          INSERTION_RETRY_INTERVAL, INSERTION_RETRY_INTERVAL_DEFAULT));
 +
++    initReadWritePartition(p);
++  }
++
++  private void initReadWritePartition(Properties p) throws WorkloadException {
 +    readWritePartition = Boolean.parseBoolean(
 +        p.getProperty(READ_WRITE_PARTITION, READ_WRITE_PARTITION_DEFAULT));
 +    if (readWritePartition) {
@@ -87,7 +91,7 @@ index 68f377c1..d4a21273 100644
    }
  
    /**
-@@ -654,6 +711,19 @@ public class CoreWorkload extends Workload {
+@@ -654,6 +715,19 @@ public class CoreWorkload extends Workload {
     */
    @Override
    public boolean doTransaction(DB db, Object threadstate) {
@@ -107,7 +111,7 @@ index 68f377c1..d4a21273 100644
      String operation = operationchooser.nextString();
      if(operation == null) {
        return false;
-@@ -721,8 +791,10 @@ public class CoreWorkload extends Workload {
+@@ -721,8 +795,10 @@ public class CoreWorkload extends Workload {
  
    public void doTransactionRead(DB db) {
      // choose a random key
@@ -119,7 +123,7 @@ index 68f377c1..d4a21273 100644
      String keyname = CoreWorkload.buildKeyName(keynum, zeropadding, orderedinserts);
  
      HashSet<String> fields = null;
-@@ -821,8 +893,10 @@ public class CoreWorkload extends Workload {
+@@ -821,8 +897,10 @@ public class CoreWorkload extends Workload {
  
    public void doTransactionUpdate(DB db) {
      // choose a random key
