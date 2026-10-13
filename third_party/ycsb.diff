@@ -1,3 +1,136 @@
+diff --git a/core/src/main/java/site/ycsb/workloads/CoreWorkload.java b/core/src/main/java/site/ycsb/workloads/CoreWorkload.java
+index 68f377c1..d4a21273 100644
+--- a/core/src/main/java/site/ycsb/workloads/CoreWorkload.java
++++ b/core/src/main/java/site/ycsb/workloads/CoreWorkload.java
+@@ -24,6 +24,7 @@ import site.ycsb.measurements.Measurements;
+ 
+ import java.io.IOException;
+ import java.util.*;
++import java.util.concurrent.ThreadLocalRandom;
+ 
+ /**
+  * The core benchmark scenario. Represents a set of clients doing simple CRUD operations. The
+@@ -356,6 +357,23 @@ public class CoreWorkload extends Workload {
+    */
+   public static final String FIELD_NAME_PREFIX_DEFAULT = "field";
+ 
++  /*
++   * Read/update are chosen by independent trials, so a page's past clean/dirty history cannot
++   * predict its future (needed by SSP's clean-demotion predictor). When enabled, the key space is
++   * split into blocks of consecutive keys, and each block is either read-heavy or update-heavy.
++   * Blocks, not single keys: a page holds 3~42 records and consecutive keys are loaded into the
++   * same pages. 4096 is far larger than that, and nothing in the tiering path depends on address
++   * contiguity, so any size around 1K~100K should behave the same.
++   */
++  public static final String READ_WRITE_PARTITION = "read_write_partition";
++  public static final String READ_WRITE_PARTITION_DEFAULT = "false";
++  public static final String KEYS_PER_BLOCK = "read_write_partition.keys_per_block";
++  public static final String KEYS_PER_BLOCK_DEFAULT = "4096";
++  /** Update ratio inside an update-heavy block. A read-heavy block uses 1 - this value. */
++  public static final String UPDATE_HEAVY_BLOCK_UPDATE_PROPORTION =
++      "read_write_partition.update_heavy_block.update_proportion";
++  public static final String UPDATE_HEAVY_BLOCK_UPDATE_PROPORTION_DEFAULT = "0.95";
++
+   protected NumberGenerator keysequence;
+   protected DiscreteGenerator operationchooser;
+   protected NumberGenerator keychooser;
+@@ -368,6 +386,10 @@ public class CoreWorkload extends Workload {
+   protected int zeropadding;
+   protected int insertionRetryLimit;
+   protected int insertionRetryInterval;
++  protected boolean readWritePartition;
++  protected long keysPerBlock;
++  protected double updateHeavyBlockFraction;
++  protected double updateHeavyBlockUpdateProportion;
+ 
+   private Measurements measurements = Measurements.getMeasurements();
+ 
+@@ -545,6 +567,41 @@ public class CoreWorkload extends Workload {
+         INSERTION_RETRY_LIMIT, INSERTION_RETRY_LIMIT_DEFAULT));
+     insertionRetryInterval = Integer.parseInt(p.getProperty(
+         INSERTION_RETRY_INTERVAL, INSERTION_RETRY_INTERVAL_DEFAULT));
++
++    readWritePartition = Boolean.parseBoolean(
++        p.getProperty(READ_WRITE_PARTITION, READ_WRITE_PARTITION_DEFAULT));
++    if (readWritePartition) {
++      keysPerBlock = Long.parseLong(p.getProperty(KEYS_PER_BLOCK, KEYS_PER_BLOCK_DEFAULT));
++      updateHeavyBlockUpdateProportion = Double.parseDouble(p.getProperty(
++          UPDATE_HEAVY_BLOCK_UPDATE_PROPORTION, UPDATE_HEAVY_BLOCK_UPDATE_PROPORTION_DEFAULT));
++      // Fraction of update-heavy blocks is set to updateproportion as is. The overall update ratio
++      // then matches updateproportion only at 0.5 (workload B with 0.95 as the update-heavy block's
++      // update ratio: 0.05 -> 9.5%). Solving for an exact match instead gives 0 update-heavy blocks
++      // for workload B, i.e. every block becomes read-heavy, so the simple form is kept.
++      updateHeavyBlockFraction = Double.parseDouble(
++          p.getProperty(UPDATE_PROPORTION_PROPERTY, UPDATE_PROPORTION_PROPERTY_DEFAULT));
++
++      double otherProportion = Double.parseDouble(
++          p.getProperty(INSERT_PROPORTION_PROPERTY, INSERT_PROPORTION_PROPERTY_DEFAULT))
++          + Double.parseDouble(p.getProperty(SCAN_PROPORTION_PROPERTY, SCAN_PROPORTION_PROPERTY_DEFAULT))
++          + Double.parseDouble(p.getProperty(
++              READMODIFYWRITE_PROPORTION_PROPERTY, READMODIFYWRITE_PROPORTION_PROPERTY_DEFAULT));
++      if (keysPerBlock <= 0 || otherProportion > 0
++          || updateHeavyBlockUpdateProportion < 0 || updateHeavyBlockUpdateProportion > 1) {
++        throw new WorkloadException(READ_WRITE_PARTITION + " requires " + KEYS_PER_BLOCK + " > 0, "
++            + UPDATE_HEAVY_BLOCK_UPDATE_PROPORTION + " in [0, 1], and only read/update operations");
++      }
++      System.err.println(READ_WRITE_PARTITION + ": keys_per_block=" + keysPerBlock
++          + " update_heavy_block_fraction=" + updateHeavyBlockFraction
++          + " update_heavy_block.update_proportion=" + updateHeavyBlockUpdateProportion
++          + " read_heavy_block.update_proportion=" + (1 - updateHeavyBlockUpdateProportion));
++    }
++  }
++
++  /** Whether the block containing keynum is update-heavy. Fixed per block across runs. */
++  protected boolean isUpdateHeavyBlock(long keynum) {
++    long block = keynum / keysPerBlock;
++    return Utils.fnvhash64(block) % 10000 < updateHeavyBlockFraction * 10000;
+   }
+ 
+   /**
+@@ -654,6 +711,19 @@ public class CoreWorkload extends Workload {
+    */
+   @Override
+   public boolean doTransaction(DB db, Object threadstate) {
++    if (readWritePartition) {
++      // Pick the key first, then the operation by the key's block.
++      long keynum = nextKeynum();
++      double updateProportion = isUpdateHeavyBlock(keynum)
++          ? updateHeavyBlockUpdateProportion : 1 - updateHeavyBlockUpdateProportion;
++      if (ThreadLocalRandom.current().nextDouble() < updateProportion) {
++        doTransactionUpdate(db, keynum);
++      } else {
++        doTransactionRead(db, keynum);
++      }
++      return true;
++    }
++
+     String operation = operationchooser.nextString();
+     if(operation == null) {
+       return false;
+@@ -721,8 +791,10 @@ public class CoreWorkload extends Workload {
+ 
+   public void doTransactionRead(DB db) {
+     // choose a random key
+-    long keynum = nextKeynum();
++    doTransactionRead(db, nextKeynum());
++  }
+ 
++  public void doTransactionRead(DB db, long keynum) {
+     String keyname = CoreWorkload.buildKeyName(keynum, zeropadding, orderedinserts);
+ 
+     HashSet<String> fields = null;
+@@ -821,8 +893,10 @@ public class CoreWorkload extends Workload {
+ 
+   public void doTransactionUpdate(DB db) {
+     // choose a random key
+-    long keynum = nextKeynum();
++    doTransactionUpdate(db, nextKeynum());
++  }
+ 
++  public void doTransactionUpdate(DB db, long keynum) {
+     String keyname = CoreWorkload.buildKeyName(keynum, zeropadding, orderedinserts);
+ 
+     HashMap<String, ByteIterator> values;
 diff --git a/redis/src/main/java/site/ycsb/db/RedisClient.java b/redis/src/main/java/site/ycsb/db/RedisClient.java
 index 2de9ad23..5bb99374 100644
 --- a/redis/src/main/java/site/ycsb/db/RedisClient.java
